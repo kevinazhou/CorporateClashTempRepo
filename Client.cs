@@ -1,182 +1,104 @@
-﻿using System.Collections;
+﻿using System;
 using System.Collections.Generic;
-using UnityEngine;
+using System.Text;
 using System.Net;
 using System.Net.Sockets;
-using System;
 
-public class Client : MonoBehaviour
+namespace CCServer
 {
-    public static Client instance;
-
-    public static int dataBufferSize = 4096;
-
-    public string ip = "127.0.0.1";
-    public int port = 26950;
-    public int myID = 0;
-    public TCP tcp;
-
-    private delegate void PacketHandler(Packet packet);
-    private static Dictionary<int, PacketHandler> packetHandlers;
-
-    private void Awake()
+    class Client
     {
-        if(instance == null)
+        //4mb
+        public static int dataBufferSize = 4096;
+        public int id;
+        public TCP tcp;
+
+        public Client(int clientID)
         {
-            instance = this;
+            id = clientID;
+            tcp = new TCP(id);
         }
-        else if(instance != this)
+
+        //Stores the TcpClient instance
+        public class TCP
         {
-            Debug.Log("Instance already exists, destroying object!");
-            Destroy(this);
-        }
-    }
+            public TcpClient socket;
 
-    private void Start()
-    {
-        tcp = new TCP();
-    }
-
-    public void ConnectToServer()
-    {
-        InitializeClientData();
-        tcp.Connect();
-    }
-
-    public class TCP
-    {
-        public TcpClient socket;
-
-        private NetworkStream stream;
-        private Packet receivedData;
-        private byte[] receiveBuffer;
-
-        public void Connect()
-        {
-            socket = new TcpClient
+            private readonly int id;
+            //NetworkStream: for sending and receiving data over stream sockets
+            private NetworkStream stream;
+            private byte[] receiveBuffer;
+            public TCP(int _id)
             {
-                ReceiveBufferSize = dataBufferSize,
-                SendBufferSize = dataBufferSize
-            };
-
-            receiveBuffer = new byte[dataBufferSize];
-            socket.BeginConnect(instance.ip, instance.port, ConnectCallback, socket);
-        }
-
-        private void ConnectCallback(IAsyncResult res)
-        {
-            socket.EndConnect(res);
-
-            if(!socket.Connected)
-            {
-                return;
+                id = _id;
             }
 
-            stream = socket.GetStream();
-
-            receivedData = new Packet();
-
-            //WAITING FOR DATA FROM THE SERVER
-            stream.BeginRead(receiveBuffer, 0, dataBufferSize, ReceiveCallback, null);
-        }
-
-        private void ReceiveCallback(IAsyncResult res)
-        {
-            try
+            public void Connect(TcpClient _socket)
             {
-                //waits for pending async read to complete
-                //res is a reference to the pending async request
-                int byteLength = stream.EndRead(res);
-                if (byteLength <= 0)
-                {
-                    //TODO: Disconnect
-                    return;
-                }
+                socket = _socket;
+                socket.ReceiveBufferSize = dataBufferSize;
+                socket.SendBufferSize = dataBufferSize;
 
-                byte[] data = new byte[byteLength];
+                stream = socket.GetStream();
 
-                //copy received bytes into new array
-                Array.Copy(receiveBuffer, data, byteLength);
+                receiveBuffer = new byte[dataBufferSize];
 
-                //HANDLE THE DATA HERE
-                receivedData.Reset(HandleData(data));
-
-                //Continue reading data from the stream
+                //WAITING FOR DATA FROM GAME CLIENT
+                //begins async read operation
+                //buffer to read data into, begin reading at 0 byte offset, max bytes to read
                 stream.BeginRead(receiveBuffer, 0, dataBufferSize, ReceiveCallback, null);
+
+                //SENDING WELCOME PACKET to the client
+                Console.WriteLine("Sending welcome packet");
+                ServerSend.Welcome(id, "Welcome to the server!");
             }
-            catch (Exception ex)
+
+            public void SendData(Packet packet)
             {
-                Console.WriteLine($"Error receiving TCP data: {ex}");
-                //TODO: Disconnect client
-            }
-        }
-
-        //Reorder bytes that may have arrived out of order
-        private bool HandleData(byte[] data)
-        {
-            int packetLength = 0;
-
-            receivedData.SetBytes(data);
-
-            //If received data contains more than 4 unread bytes,
-            //then this is the start of a packet, since the length is stored
-            //as an int at the start of the packet
-            if(receivedData.UnreadLength() >= 4)
-            {
-                packetLength = receivedData.ReadInt();
-                if(packetLength <= 0)
+                //try to catch errors
+                try
                 {
-                    return true;
+                    if(socket != null)
+                    {
+                        //BEGIN WRITING DATA TO UNITY CLIENT
+                        stream.BeginWrite(packet.ToArray(), 0, packet.Length(), null, null);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error sending data to player {id} via TCP: {ex}");
                 }
             }
 
-            //While there is still data to be read
-            while(packetLength > 0 && packetLength <= receivedData.UnreadLength())
+            private void ReceiveCallback(IAsyncResult res)
             {
-                //Read the packet's bytes into a new byte array
-                byte[] packetBytes = receivedData.ReadBytes(packetLength);
-
-                ThreadManager.ExecuteOnMainThread(() =>
+                try
                 {
-                    //Create a new packet from the packetBytes
-                    using (Packet packet = new Packet(packetBytes))
+                    //waits for pending async read to complete
+                    //res is a reference to the pending async request
+                    int byteLength = stream.EndRead(res);
+                    if(byteLength <= 0)
                     {
-                        //Read the packet's ID
-                        int packetID = packet.ReadInt();
-
-                        //Now we can invoke a specific delegate function based on the packet's ID
-                        packetHandlers[packetID](packet);
+                        //TODO: Disconnect
+                        return;
                     }
-                });
 
-                packetLength = 0;
-                if (receivedData.UnreadLength() >= 4)
+                    byte[] data = new byte[byteLength];
+
+                    //copy received bytes into new array
+                    Array.Copy(receiveBuffer, data, byteLength);
+
+                    //TODO: HANDLE THE DATA HERE
+
+                    //Continue reading data from the stream
+                    stream.BeginRead(receiveBuffer, 0, dataBufferSize, ReceiveCallback, null);
+                }
+                catch(Exception ex)
                 {
-                    packetLength = receivedData.ReadInt();
-                    if (packetLength <= 0)
-                    {
-                        return true;
-                    }
+                    Console.WriteLine($"Error receiving TCP data: {ex}");
+                    //TODO: Disconnect client
                 }
             }
-
-            if(packetLength <= 1)
-            {
-                //Reset the packet
-                return true;
-            }
-            //Otherwise don't reset the packet as there is a partial packet left
-            return false;
         }
-    }
-
-    private void InitializeClientData()
-    {
-        packetHandlers = new Dictionary<int, PacketHandler>()
-        {
-            //First packet has Welcome function to handle it
-            { (int)ServerPackets.welcome, ClientHandle.Welcome }
-        };
-        Debug.Log("Initialized packets");
     }
 }
